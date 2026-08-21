@@ -1,0 +1,46 @@
+﻿name: SAMAR Telegram Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      bot_token:
+        description: "Telegram Bot Token"
+        required: true
+        type: string
+      chat_id:
+        description: "Telegram Chat ID"
+        required: true
+        type: string
+
+jobs:
+  telegram:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram test
+        env:
+          BOT_TOKEN: ${{ inputs.bot_token }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          echo "Testing Telegram from GitHub..."
+
+          RESPONSE=$(curl -sS --max-time 20 \
+            -X POST \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=🔔 SAMAR TEST
+
+این پیام از GitHub Relay ارسال شد.
+
+لطفاً پاسخ بده:
+OK")
+
+          echo "$RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "================================"
+            echo "TELEGRAM SEND: SUCCESS"
+            echo "================================"
+          else
+            echo "TELEGRAM SEND: FAILED"
+            exit 1
+          fi
