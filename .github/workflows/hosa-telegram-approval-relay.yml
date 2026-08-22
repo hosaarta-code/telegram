@@ -71,6 +71,8 @@ jobs:
           keyboard="$(jq -cn --arg approve "hosa:${CORRELATION_ID}:approve" --arg reject "hosa:${CORRELATION_ID}:reject" '{inline_keyboard:[[ {text:"APPROVE",callback_data:$approve},{text:"REJECT",callback_data:$reject} ]]}' )"
           sent="$(curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${message}" --data-urlencode "reply_markup=${keyboard}")" || { echo "Telegram approval delivery failed."; exit 1; }
           printf '%s' "$sent" | jq -e '.ok == true' >/dev/null || { echo "Telegram rejected approval delivery."; exit 1; }
+          message_id="$(printf '%s' "$sent" | jq -r '.result.message_id // empty')"
+          [[ "$message_id" =~ ^[0-9]+$ ]] || { echo "Telegram approval delivery did not return a message id."; exit 1; }
           decision="EXPIRED"
           while (( $(date +%s%3N) < EXPIRES_AT_MS )); do
             args=(--silent --show-error --fail --max-time 20 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=10")
@@ -85,7 +87,10 @@ jobs:
               callback_id="$(printf '%s' "$callback" | jq -r '.id')"
               callback_data="$(printf '%s' "$callback" | jq -r '.data')"
               if [[ "$callback_data" == "$approve" ]]; then decision="APPROVE"; else decision="REJECT"; fi
-              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery" --data-urlencode "callback_query_id=${callback_id}" --data-urlencode "text=HOSA received the decision. Local revalidation is now required." >/dev/null || true
+              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery" --data-urlencode "callback_query_id=${callback_id}" --data-urlencode "text=HOSA received the decision. The buttons are now locked." >/dev/null || true
+              closed_message="HOSA MOBILE APPROVAL\n\nDecision recorded: ${decision}\n\nThis message is closed. Further APPROVE or REJECT taps are disabled. HOSA must still validate the original approval locally before any Paper or Live action."
+              closed_keyboard="$(jq -cn '{inline_keyboard:[]}')"
+              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "message_id=${message_id}" --data-urlencode "text=${closed_message}" --data-urlencode "reply_markup=${closed_keyboard}" >/dev/null || { echo "Telegram approval decision was received but the keyboard could not be disabled."; exit 1; }
               break
             fi
           done
