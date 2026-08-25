@@ -29,6 +29,31 @@ on:
         required: true
         type: choice
         options: [LONG, SHORT]
+      position_size_usdt:
+        description: Approved position size in USDT
+        required: true
+        type: string
+      risk_usdt:
+        description: Maximum risk to stop loss in USDT
+        required: true
+        type: string
+      leverage:
+        description: Requested leverage as a whole number
+        required: true
+        type: string
+      entry_price:
+        description: Display-safe entry reference price
+        required: true
+        type: string
+      stop_loss:
+        description: Display-safe stop-loss price
+        required: true
+        type: string
+      take_profit:
+        description: Display-safe take-profit price or N/A
+        required: false
+        default: N/A
+        type: string
 permissions:
   contents: read
 
@@ -45,6 +70,12 @@ jobs:
       MODE: ${{ inputs.mode }}
       CONTRACT: ${{ inputs.contract }}
       DIRECTION: ${{ inputs.direction }}
+      POSITION_SIZE_USDT: ${{ inputs.position_size_usdt }}
+      RISK_USDT: ${{ inputs.risk_usdt }}
+      LEVERAGE: ${{ inputs.leverage }}
+      ENTRY_PRICE: ${{ inputs.entry_price }}
+      STOP_LOSS: ${{ inputs.stop_loss }}
+      TAKE_PROFIT: ${{ inputs.take_profit }}
     steps:
       - name: Validate relay inputs and secrets
         shell: bash
@@ -54,6 +85,12 @@ jobs:
           [[ "$APPROVAL_ID" =~ ^[A-Za-z0-9_-]{10,64}$ ]] || { echo "Approval identifier is malformed."; exit 1; }
           [[ "$CORRELATION_ID" =~ ^[A-Za-z0-9_-]{16,64}$ ]] || { echo "Correlation identifier is malformed."; exit 1; }
           [[ "$EXPIRES_AT_MS" =~ ^[0-9]{13}$ ]] || { echo "Expiry is malformed."; exit 1; }
+          [[ "$POSITION_SIZE_USDT" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "Position size is malformed."; exit 1; }
+          [[ "$RISK_USDT" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "Risk amount is malformed."; exit 1; }
+          [[ "$LEVERAGE" =~ ^[1-9][0-9]*$ ]] || { echo "Leverage is malformed."; exit 1; }
+          [[ "$ENTRY_PRICE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "Entry price is malformed."; exit 1; }
+          [[ "$STOP_LOSS" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "Stop loss is malformed."; exit 1; }
+          [[ "$TAKE_PROFIT" == "N/A" || "$TAKE_PROFIT" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "Take profit is malformed."; exit 1; }
 
       - name: Relay the approval buttons and capture one matching reply
         id: relay
@@ -67,8 +104,23 @@ jobs:
           fi
           initial="$(curl --silent --show-error --fail --max-time 20 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0")" || { echo "Telegram relay preflight failed."; exit 1; }
           offset="$(printf '%s' "$initial" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
-          message="SAMAR · ${MODE}\n${CONTRACT} ${DIRECTION}\n\nTap APPROVE or REJECT. HOSA will revalidate the signal locally before any position can open."
+          message="$(cat <<EOF
+          SAMAR — ${MODE} APPROVAL
+          ----------------------
+          Market: ${CONTRACT}
+          Side: ${DIRECTION}
 
+          Position Size: ${POSITION_SIZE_USDT} USDT
+          Leverage: ${LEVERAGE}x
+          Risk to Stop: ${RISK_USDT} USDT
+
+          Entry: ${ENTRY_PRICE}
+          Stop Loss: ${STOP_LOSS}
+          Take Profit: ${TAKE_PROFIT}
+
+          Review position size, leverage and risk before approving.
+          EOF
+          )"
           keyboard="$(jq -cn --arg approve "hosa:${CORRELATION_ID}:approve" --arg reject "hosa:${CORRELATION_ID}:reject" '{inline_keyboard:[[ {text:"APPROVE",callback_data:$approve},{text:"REJECT",callback_data:$reject} ]]}' )"
           sent="$(curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${message}" --data-urlencode "reply_markup=${keyboard}")" || { echo "Telegram approval delivery failed."; exit 1; }
           printf '%s' "$sent" | jq -e '.ok == true' >/dev/null || { echo "Telegram rejected approval delivery."; exit 1; }
@@ -89,7 +141,7 @@ jobs:
               callback_data="$(printf '%s' "$callback" | jq -r '.data')"
               if [[ "$callback_data" == "$approve" ]]; then decision="APPROVE"; else decision="REJECT"; fi
               curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery" --data-urlencode "callback_query_id=${callback_id}" --data-urlencode "text=HOSA received the decision. The buttons are now locked." >/dev/null || true
-              closed_message="HOSA MOBILE APPROVAL\n\nDecision recorded: ${decision}\n\nThis message is closed. Further APPROVE or REJECT taps are disabled. HOSA must still validate the original approval locally before any Paper or Live action."
+              closed_message="$(printf 'SAMAR — %s APPROVAL\n\nDecision recorded: %s\n\nThis message is closed. HOSA must still validate the original approval locally before any Paper or Live action.' "$MODE" "$decision")"
               closed_keyboard="$(jq -cn '{inline_keyboard:[]}')"
               curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "message_id=${message_id}" --data-urlencode "text=${closed_message}" --data-urlencode "reply_markup=${closed_keyboard}" >/dev/null || { echo "Telegram approval decision was received but the keyboard could not be disabled."; exit 1; }
               break
