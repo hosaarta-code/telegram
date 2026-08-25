@@ -67,7 +67,8 @@ jobs:
           fi
           initial="$(curl --silent --show-error --fail --max-time 20 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0")" || { echo "Telegram relay preflight failed."; exit 1; }
           offset="$(printf '%s' "$initial" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
-          message="HOSA MOBILE APPROVAL\nMode: ${MODE}\nContract: ${CONTRACT}\nDirection: ${DIRECTION}\n\nTap APPROVE or REJECT. HOSA will locally revalidate the closed-candle signal, current price, risk size, stop, and target before any position can open. A button approval does not guarantee execution."
+          message="SAMAR · ${MODE}\n${CONTRACT} ${DIRECTION}\n\nTap APPROVE or REJECT. HOSA will revalidate the signal locally before any position can open."
+
           keyboard="$(jq -cn --arg approve "hosa:${CORRELATION_ID}:approve" --arg reject "hosa:${CORRELATION_ID}:reject" '{inline_keyboard:[[ {text:"APPROVE",callback_data:$approve},{text:"REJECT",callback_data:$reject} ]]}' )"
           sent="$(curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${message}" --data-urlencode "reply_markup=${keyboard}")" || { echo "Telegram approval delivery failed."; exit 1; }
           printf '%s' "$sent" | jq -e '.ok == true' >/dev/null || { echo "Telegram rejected approval delivery."; exit 1; }
