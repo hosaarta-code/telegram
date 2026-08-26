@@ -1,5 +1,6 @@
 name: SAMAR Telegram Approval Relay
 run-name: SAMAR relay ${{ inputs.correlation_id }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -50,7 +51,7 @@ on:
         required: false
         type: string
       take_profit:
-        description: Target level
+        description: Take-profit reference
         required: false
         type: string
   push:
@@ -100,14 +101,13 @@ jobs:
           if (( EXPIRES_AT_MS <= now_ms )); then echo "decision=EXPIRED" >> "$GITHUB_OUTPUT"; exit 0; fi
           initial="$(curl --silent --show-error --fail --max-time 20 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0")" || { echo "Telegram relay preflight failed."; exit 1; }
           offset="$(printf '%s' "$initial" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
-          message="SAMAR · ${MODE}
-────────────
-${CONTRACT}  ${DIRECTION}
-Size: ${POSITION_SIZE_USDT:-?} USDT · Risk: ${RISK_USDT:-?} USDT · Lev ${LEVERAGE:-?}x
-Entry: ${ENTRY_PRICE:-?}
-SL: ${STOP_LOSS:-?} · TP: ${TAKE_PROFIT:-?}
-────────────
-Tap APPROVE or REJECT. Local SAMAR revalidates before any order."
+          message="$(printf '%s\n' \
+            "SAMAR | ${MODE}" \
+            "${CONTRACT} ${DIRECTION}" \
+            "Size: ${POSITION_SIZE_USDT:-?} USDT | Risk: ${RISK_USDT:-?} USDT | Lev ${LEVERAGE:-?}x" \
+            "Entry: ${ENTRY_PRICE:-?}" \
+            "SL: ${STOP_LOSS:-?} | TP: ${TAKE_PROFIT:-?}" \
+            "Tap APPROVE or REJECT. Local SAMAR revalidates before any order.")"
           keyboard="$(jq -cn --arg approve "samar:${CORRELATION_ID}:approve" --arg reject "samar:${CORRELATION_ID}:reject" '{inline_keyboard:[[ {text:"APPROVE",callback_data:$approve},{text:"REJECT",callback_data:$reject} ]]}' )"
           sent="$(curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${message}" --data-urlencode "reply_markup=${keyboard}")" || { echo "Telegram approval delivery failed."; exit 1; }
           printf '%s' "$sent" | jq -e '.ok == true' >/dev/null || { echo "Telegram rejected approval delivery."; exit 1; }
