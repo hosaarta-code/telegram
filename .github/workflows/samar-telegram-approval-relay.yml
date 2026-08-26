@@ -53,12 +53,17 @@ on:
         description: Target level
         required: false
         type: string
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/samar-telegram-approval-relay.yml
 
 permissions:
   contents: read
 
 jobs:
   telegram-approval-relay:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
