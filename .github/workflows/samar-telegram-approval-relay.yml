@@ -1,5 +1,5 @@
 name: SAMAR Telegram Approval Relay
-
+run-name: SAMAR relay ${{ inputs.correlation_id }}
 on:
   workflow_dispatch:
     inputs:
