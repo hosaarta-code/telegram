@@ -111,7 +111,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]] || { echo "GitHub Telegram relay secrets are missing."; exit 1; }
+          token="$(printf '%s' "${BOT_TOKEN:-}" | tr -d '\r\n' | sed -E 's#^https://api.telegram.org/bot##; s#^bot##')"
+          [[ "$token" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{20,}$ ]] || { echo "TELEGRAM_BOT_TOKEN is missing or malformed (expected numeric_id:token; value is not printed)."; exit 1; }
+          [[ -n "${CHAT_ID:-}" ]] || { echo "TELEGRAM_CHAT_ID is missing."; exit 1; }
+          printf 'BOT_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
           [[ "$APPROVAL_ID" =~ ^[A-Za-z0-9_-]{10,64}$ ]] || { echo "Approval identifier is malformed."; exit 1; }
           [[ "$CORRELATION_ID" =~ ^[A-Za-z0-9_-]{16,64}$ ]] || { echo "Correlation identifier is malformed."; exit 1; }
           [[ "$EXPIRES_AT_MS" =~ ^[0-9]{13}$ ]] || { echo "Expiry is malformed."; exit 1; }
@@ -214,12 +217,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]] || { echo "Telegram ingest secrets are missing."; exit 1; }
+          token="$(printf '%s' "${BOT_TOKEN:-}" | tr -d '\r\n' | sed -E 's#^https://api.telegram.org/bot##; s#^bot##')"
+          [[ "$token" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{20,}$ ]] || { echo "TELEGRAM_BOT_TOKEN is missing or malformed (expected numeric_id:token; value is not printed)."; exit 1; }
+          [[ -n "${CHAT_ID:-}" ]] || { echo "TELEGRAM_CHAT_ID is missing."; exit 1; }
+          printf 'BOT_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
+          export BOT_TOKEN="$token"
           mkdir -p runtime/command-center-inbox
           offset=0
           if [[ -f runtime/telegram-analysis-offset.txt ]]; then offset="$(cat runtime/telegram-analysis-offset.txt)"; fi
-          updates="$(curl --silent --show-error --fail --max-time 30 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0" --data-urlencode "offset=${offset}")"
-          printf '%s' "$updates" | jq -e '.ok == true' >/dev/null
+          curl_error="$(mktemp)"
+          if ! updates="$(curl --silent --show-error --fail --max-time 30 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0" --data-urlencode "offset=${offset}" 2>"$curl_error")"; then
+            echo "Telegram getUpdates curl failed: $(tr '\n' ' ' < "$curl_error" | cut -c1-240)"
+            exit 1
+          fi
+          if ! printf '%s' "$updates" | jq -e '.ok == true' >/dev/null; then
+            echo "Telegram API error: $(printf '%s' "$updates" | jq -r '.description // "unknown error"' 2>/dev/null || echo "invalid JSON response")"
+            exit 1
+          fi
           next_offset="$(printf '%s' "$updates" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
           if [[ -n "$next_offset" ]]; then printf '%s' "$next_offset" > runtime/telegram-analysis-offset.txt; fi
           while IFS= read -r update; do
