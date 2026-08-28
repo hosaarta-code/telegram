@@ -201,6 +201,9 @@ jobs:
   ingest-analysis-responses:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
       - name: Checkout inbox state
         uses: actions/checkout@v4
