@@ -1,0 +1,59 @@
+name: SAMAR Telegram Analysis Ingest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    env:
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: Checkout inbox state
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Ingest authorized SAMAR responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]] || { echo "Telegram ingest secrets are missing."; exit 1; }
+          mkdir -p runtime/command-center-inbox
+          offset=0
+          if [[ -f runtime/telegram-analysis-offset.txt ]]; then offset="$(cat runtime/telegram-analysis-offset.txt)"; fi
+          updates="$(curl --silent --show-error --fail --max-time 30 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0" --data-urlencode "offset=${offset}")"
+          printf '%s' "$updates" | jq -e '.ok == true' >/dev/null
+          next_offset="$(printf '%s' "$updates" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
+          if [[ -n "$next_offset" ]]; then printf '%s' "$next_offset" > runtime/telegram-analysis-offset.txt; fi
+          processed=0
+          while IFS= read -r update; do
+            [[ -n "$update" ]] || continue
+            chat="$(printf '%s' "$update" | jq -r '.message.chat.id? // empty')"
+            sender="$(printf '%s' "$update" | jq -r '.message.from.id? // empty')"
+            text="$(printf '%s' "$update" | jq -r '.message.text? // empty')"
+            [[ "$chat" == "$CHAT_ID" && "$sender" == "$CHAT_ID" ]] || continue
+            [[ "$text" == /samar_response* ]] || continue
+            request_id="$(printf '%s\n' "$text" | sed -n 's#^/samar_response[[:space:]]\+\(cc_req_[A-Za-z0-9_-]\{18\}\).*#\1#p')"
+            [[ "$request_id" =~ ^cc_req_[A-Za-z0-9_-]{18}$ ]] || continue
+            payload="$(printf '%s\n' "$text" | sed '1d')"
+            payload="$(printf '%s\n' "$payload" | sed '/^```[[:alnum:]_-]*[[:space:]]*$/d; /^```[[:space:]]*$/d')"
+            printf '%s' "$payload" | jq -e --arg request_id "$request_id" 'type == "object" and .requestId == $request_id' > /tmp/samar-response.json || continue
+            jq -cn --arg source "TELEGRAM_INGEST_WORKFLOW" --arg request_id "$request_id" --arg telegram_user_id "$sender" --slurpfile response /tmp/samar-response.json '{schema_version:1,source:$source,requestId:$request_id,telegramUserId:$telegram_user_id,response:$response[0]}' > "runtime/command-center-inbox/${request_id}.json"
+            curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=SAMAR: پاسخ ${request_id} دریافت شد و برای ثبت خودکار در چرخه ارسال می‌شود." >/dev/null || true
+            processed=$((processed + 1))
+          done < <(printf '%s' "$updates" | jq -c '.result[]?')
+          if [[ -n "$next_offset" || "$processed" -gt 0 ]]; then
+            git config user.name "SAMAR Telegram Ingest"
+            git config user.email "samar-telegram-ingest@users.noreply.github.com"
+            git add runtime/command-center-inbox runtime/telegram-analysis-offset.txt
+            git diff --cached --quiet || git commit -m "chore: ingest SAMAR Telegram analysis response"
+            git push
+          fi
+
