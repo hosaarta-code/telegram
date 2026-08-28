@@ -54,6 +54,16 @@ on:
         description: Take-profit reference
         required: false
         type: string
+      message_type:
+        description: APPROVAL renders trade buttons; MATERIAL_CHANGE renders governed-change buttons; NOTICE sends a button-free status/report message
+        required: false
+        type: choice
+        default: APPROVAL
+        options: [APPROVAL, MATERIAL_CHANGE, NOTICE]
+      notification_text:
+        description: Button-free status or report text for NOTICE messages
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
@@ -82,6 +92,8 @@ jobs:
       ENTRY_PRICE: ${{ inputs.entry_price }}
       STOP_LOSS: ${{ inputs.stop_loss }}
       TAKE_PROFIT: ${{ inputs.take_profit }}
+      MESSAGE_TYPE: ${{ inputs.message_type }}
+      NOTIFICATION_TEXT: ${{ inputs.notification_text }}
     steps:
       - name: Validate relay inputs and GitHub secrets
         shell: bash
@@ -97,20 +109,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${MESSAGE_TYPE:-APPROVAL}" == "NOTICE" ]]; then
+            notice="${NOTIFICATION_TEXT:-SAMAR PAPER notification}"
+            sent="$(curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${notice}")" || { echo "Telegram notice delivery failed."; exit 1; }
+            printf '%s' "$sent" | jq -e '.ok == true' >/dev/null || { echo "Telegram rejected notice delivery."; exit 1; }
+            echo "decision=NOTICE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           now_ms="$(date +%s%3N)"
           if (( EXPIRES_AT_MS <= now_ms )); then echo "decision=EXPIRED" >> "$GITHUB_OUTPUT"; exit 0; fi
           initial="$(curl --silent --show-error --fail --max-time 20 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=0")" || { echo "Telegram relay preflight failed."; exit 1; }
           offset="$(printf '%s' "$initial" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
-          message="$(printf '%s\n' \
-            "SAMAR | ${MODE}" \
-            "${CONTRACT} ${DIRECTION}" \
-            "Size: ${POSITION_SIZE_USDT:-?} USDT | Risk: ${RISK_USDT:-?} USDT | Lev ${LEVERAGE:-?}x" \
-            "Entry: ${ENTRY_PRICE:-?}" \
-            "SL: ${STOP_LOSS:-?} | TP: ${TAKE_PROFIT:-?}" \
-            "Tap APPROVE or REJECT. Local SAMAR revalidates before any order.")"
+          if [[ "${MESSAGE_TYPE:-APPROVAL}" == "MATERIAL_CHANGE" ]]; then
+            message="$(printf '%s\n' \
+              "SAMAR · درخواست تأیید تغییر مهم PAPER" \
+              "────────────────────" \
+              "${NOTIFICATION_TEXT:-شرح تغییر موجود نیست}" \
+              "شناسه تغییر: ${APPROVAL_ID}" \
+              "مهلت: $(date -u -d \"@$((${EXPIRES_AT_MS} / 1000))\" '+%Y-%m-%d %H:%M UTC')" \
+              "────────────────────" \
+              "تأیید فقط تغییر پیشنهادی را برای مرحلهٔ بعد ثبت می‌کند؛ هیچ معامله یا تغییری در LIVE اجرا نمی‌شود.")"
+          else
+            message="$(printf '%s\n' \
+              "SAMAR · ${MODE}" \
+              "────────────────────" \
+              "${CONTRACT} · ${DIRECTION}" \
+              "Size: ${POSITION_SIZE_USDT:-?} USDT · Risk: ${RISK_USDT:-?} USDT · Lev ${LEVERAGE:-?}x" \
+              "Entry: ${ENTRY_PRICE:-?}" \
+              "SL: ${STOP_LOSS:-?}" \
+              "TP plan: TP1 20% · TP2 25% · TP3 25% · TP4 30%" \
+              "TP4 reference: ${TAKE_PROFIT:-?}" \
+              "Approval ID: ${APPROVAL_ID}" \
+              "Expires: $(date -u -d \"@$((${EXPIRES_AT_MS} / 1000))\" '+%Y-%m-%d %H:%M UTC')" \
+              "────────────────────" \
+              "APPROVE opens one validated position only. REJECT or expiry opens no position.")"
+          fi
           keyboard="$(jq -cn --arg approve "samar:${CORRELATION_ID}:approve" --arg reject "samar:${CORRELATION_ID}:reject" '{inline_keyboard:[[ {text:"APPROVE",callback_data:$approve},{text:"REJECT",callback_data:$reject} ]]}' )"
           sent="$(curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${message}" --data-urlencode "reply_markup=${keyboard}")" || { echo "Telegram approval delivery failed."; exit 1; }
           printf '%s' "$sent" | jq -e '.ok == true' >/dev/null || { echo "Telegram rejected approval delivery."; exit 1; }
+          message_id="$(printf '%s' "$sent" | jq -r '.result.message_id // empty')"
+          [[ "$message_id" =~ ^[0-9]+$ ]] || { echo "Telegram approval delivery returned no message ID."; exit 1; }
           decision="EXPIRED"
           while (( $(date +%s%3N) < EXPIRES_AT_MS )); do
             args=(--silent --show-error --fail --max-time 20 --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" --data-urlencode "timeout=10")
@@ -123,7 +161,10 @@ jobs:
             if [[ -n "$callback" ]]; then
               callback_id="$(printf '%s' "$callback" | jq -r '.id')"; callback_data="$(printf '%s' "$callback" | jq -r '.data')"
               if [[ "$callback_data" == "$approve" ]]; then decision="APPROVE"; else decision="REJECT"; fi
-              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery" --data-urlencode "callback_query_id=${callback_id}" --data-urlencode "text=SAMAR received the decision. Local validation is now required." >/dev/null || true
+              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery" --data-urlencode "callback_query_id=${callback_id}" --data-urlencode "text=SAMAR decision received. Local validation is required." >/dev/null || true
+              if [[ "${MESSAGE_TYPE:-APPROVAL}" == "MATERIAL_CHANGE" ]]; then updated_message="$(printf '%s\n' "$message" "وضعیت: ${decision} — تصمیم ثبت شد؛ بررسی محلی و قابل‌ممیزی ادامه دارد.")"; else updated_message="$(printf '%s\n' "$message" "Status: ${decision} — decision captured; local SAMAR validation follows.")"; fi
+              empty_keyboard="$(jq -cn '{inline_keyboard:[]}')"
+              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "message_id=${message_id}" --data-urlencode "text=${updated_message}" --data-urlencode "reply_markup=${empty_keyboard}" >/dev/null || { echo "Telegram decision was captured, but the message could not be updated."; }
               break
             fi
           done
