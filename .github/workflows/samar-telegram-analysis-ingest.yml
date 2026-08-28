@@ -246,7 +246,7 @@ jobs:
             request_id="$(printf '%s\n' "$text" | sed -n 's#^/samar_response[[:space:]]\+\(cc_req_[A-Za-z0-9_-]\{18\}\).*#\1#p')"
             [[ "$request_id" =~ ^cc_req_[A-Za-z0-9_-]{18}$ ]] || continue
             payload="$(printf '%s\n' "$text" | sed '1d' | sed '/^```[[:alnum:]_-]*[[:space:]]*$/d; /^```[[:space:]]*$/d')"
-            printf '%s' "$payload" | jq -e --arg request_id "$request_id" 'type == "object" and .requestId == $request_id' > /tmp/samar-response.json || continue
+            printf '%s' "$payload" | jq -e --arg request_id "$request_id" 'if type == "object" and .requestId == $request_id then . else error("invalid requestId or response object") end' > /tmp/samar-response.json || continue
             jq -cn --arg source "TELEGRAM_INGEST_WORKFLOW" --arg request_id "$request_id" --arg telegram_user_id "$sender" --slurpfile response /tmp/samar-response.json '{schema_version:1,source:$source,requestId:$request_id,telegramUserId:$telegram_user_id,response:$response[0]}' > "runtime/command-center-inbox/${request_id}.json"
             curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=SAMAR: پاسخ ${request_id} دریافت شد و برای ثبت خودکار ارسال می‌شود." >/dev/null || true
           done < <(printf '%s' "$updates" | jq -c '.result[]?')
