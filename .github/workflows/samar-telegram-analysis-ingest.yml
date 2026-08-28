@@ -5,29 +5,32 @@ on:
   workflow_dispatch:
     inputs:
       approval_id:
-        description: Opaque SAMAR approval identifier
-        required: true
+        description: Opaque SAMAR approval identifier; leave empty for ingest-only runs
+        required: false
         type: string
       correlation_id:
         description: One-time local correlation identifier
-        required: true
+        required: false
         type: string
       expires_at_ms:
         description: Local approval expiry in Unix milliseconds
-        required: true
+        required: false
         type: string
       mode:
         description: PAPER or LIVE label only
-        required: true
+        required: false
+        default: PAPER
         type: choice
         options: [PAPER, LIVE]
       contract:
         description: USDT-M contract label only
-        required: true
+        required: false
+        default: SAMAR-NOTICE
         type: string
       direction:
         description: LONG or SHORT label only
-        required: true
+        required: false
+        default: LONG
         type: choice
         options: [LONG, SHORT]
       position_size_usdt:
@@ -64,6 +67,11 @@ on:
         description: Button-free status or report text for NOTICE messages
         required: false
         type: string
+      run_ingest:
+        description: Run the Telegram analysis response ingest job without sending a new message
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "*/5 * * * *"
   push:
@@ -78,7 +86,7 @@ permissions:
 
 jobs:
   telegram-approval-relay:
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ingest != true && inputs.approval_id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
@@ -191,7 +199,6 @@ jobs:
           retention-days: 1
 
   ingest-analysis-responses:
-    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -223,7 +230,7 @@ jobs:
             [[ "$request_id" =~ ^cc_req_[A-Za-z0-9_-]{18}$ ]] || continue
             payload="$(printf '%s\n' "$text" | sed '1d' | sed '/^```[[:alnum:]_-]*[[:space:]]*$/d; /^```[[:space:]]*$/d')"
             printf '%s' "$payload" | jq -e --arg request_id "$request_id" 'type == "object" and .requestId == $request_id' > /tmp/samar-response.json || continue
-            jq -cn --arg source "TELEGRAM_INGEST_WORKFLOW"--arg request_id "$request_id" --arg telegram_user_id "$sender" --slurpfile response /tmp/samar-response.json '{schema_version:1,source:$source,requestId:$request_id,telegramUserId:$telegram_user_id,response:$response[0]}' > "runtime/command-center-inbox/${request_id}.json"
+            jq -cn --arg source "TELEGRAM_INGEST_WORKFLOW" --arg request_id "$request_id" --arg telegram_user_id "$sender" --slurpfile response /tmp/samar-response.json '{schema_version:1,source:$source,requestId:$request_id,telegramUserId:$telegram_user_id,response:$response[0]}' > "runtime/command-center-inbox/${request_id}.json"
             curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=SAMAR: پاسخ ${request_id} دریافت شد و برای ثبت خودکار ارسال می‌شود." >/dev/null || true
           done < <(printf '%s' "$updates" | jq -c '.result[]?')
           if [[ -n "$next_offset" ]]; then
