@@ -19,29 +19,9 @@ jobs:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
-      - name: Send approval message with buttons
-        id: send_message
+      - name: Send message
         run: |
-          # Send message with inline keyboard
-          RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=${{ github.event.inputs.message }}" \
-            -d "parse_mode=Markdown" \
-            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ APPROVE\",\"callback_data\":\"approve\"},{\"text\":\"❌ REJECT\",\"callback_data\":\"reject\"}]]}")
-
-          # Extract message_id from response
-          MESSAGE_ID=$(echo $RESPONSE | jq -r '.result.message_id')
-          echo "MESSAGE_ID=$MESSAGE_ID" >> $GITHUB_ENV
-
-      - name: Wait for callback and update message
-        run: |
-          # Poll for callback response (simplified)
-          sleep 10  # Wait for user interaction
-
-          # In a real implementation, you would use a webhook or long polling
-          # For now, we'll just update the message after a delay
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "message_id=${MESSAGE_ID}" \
-            -d "text=✅ *Signal processed!* (Buttons removed)" \
             -d "parse_mode=Markdown"
