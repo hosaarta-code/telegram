@@ -1,0 +1,81 @@
+name: Handle Issue Comments
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  process-approval:
+    runs-on: ubuntu-latest
+    
+    # فقط روی ایشوهایی که لیبل trading-signal دارن اجرا بشه
+    if: contains(github.event.issue.labels.*.name, 'trading-signal')
+    
+    steps:
+      - name: Check if comment is approve or reject
+        id: check
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          COMMENT=$(echo "$COMMENT" | tr '[:upper:]' '[:lower:]' | xargs)
+          
+          if [[ "$COMMENT" == "approve" || "$COMMENT" == "yes" || "$COMMENT" == "+1" ]]; then
+            echo "decision=approve" >> $GITHUB_OUTPUT
+            echo "message=✅ Signal approved by @${{ github.event.comment.user.login }}"
+          elif [[ "$COMMENT" == "reject" || "$COMMENT" == "no" || "$COMMENT" == "-1" ]]; then
+            echo "decision=reject" >> $GITHUB_OUTPUT
+            echo "message=❌ Signal rejected by @${{ github.event.comment.user.login }}"
+          else
+            echo "decision=ignore" >> $GITHUB_OUTPUT
+            echo "message=⏭️ Ignored comment"
+          fi
+          
+          echo "decision=${{ steps.check.outputs.decision }}"
+          echo "message=${{ steps.check.outputs.message }}"
+
+      - name: Send Telegram notification
+        if: steps.check.outputs.decision != 'ignore'
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${{ steps.check.outputs.message }}%0A%0AIssue: ${{ github.event.issue.html_url }}%0ASymbol: ${{ github.event.issue.title }}" \
+            -d "parse_mode=Markdown"
+          
+          echo "✅ Telegram notification sent"
+
+      - name: Close issue after decision
+        if: steps.check.outputs.decision != 'ignore'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X PATCH \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}" \
+            -d '{"state":"closed"}'
+          
+          echo "✅ Issue closed"
+
+      - name: Add status comment
+        if: steps.check.outputs.decision != 'ignore'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STATUS="${{ steps.check.outputs.decision }}"
+          if [[ "$STATUS" == "approve" ]]; then
+            EMOJI="✅"
+            MSG="**APPROVED** - Trade will be executed"
+          else
+            EMOJI="❌"  
+            MSG="**REJECTED** - Trade will not be executed"
+          fi
+          
+          curl -s -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -d "{\"body\":\"${EMOJI} Signal ${MSG} by @${{ github.event.comment.user.login }}\"}"
+          
+          echo "✅ Status comment added"
