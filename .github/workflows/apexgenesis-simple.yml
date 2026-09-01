@@ -1,4 +1,4 @@
-name: APEXGenesis Approval with Buttons
+name: APEXGenesis Telegram Approval
 
 on:
   workflow_dispatch:
@@ -7,11 +7,10 @@ on:
         description: 'Message to send'
         required: true
         type: string
-      approve_id:
-        description: 'Approval ID for this signal'
-        required: false
+      approval_id:
+        description: 'Approval ID'
+        required: true
         type: string
-        default: 'test'
 
 jobs:
   send-telegram:
@@ -23,9 +22,13 @@ jobs:
     steps:
       - name: Send message with inline keyboard
         run: |
-          # Send message with inline keyboard buttons
+          # Create callback data
+          APPROVE_DATA="approve_${{ github.event.inputs.approval_id }}"
+          REJECT_DATA="reject_${{ github.event.inputs.approval_id }}"
+          
+          # Send message with inline keyboard
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=${{ github.event.inputs.message }}" \
             -d "parse_mode=Markdown" \
-            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ Approve\",\"callback_data\":\"approve_${{ github.event.inputs.approve_id }}\"},{\"text\":\"❌ Reject\",\"callback_data\":\"reject_${{ github.event.inputs.approve_id }}\"}]]}"
+            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ Approve\",\"callback_data\":\"${APPROVE_DATA}\"},{\"text\":\"❌ Reject\",\"callback_data\":\"${REJECT_DATA}\"}]]}"
