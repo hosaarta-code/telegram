@@ -1,4 +1,4 @@
-name: APEXGenesis Simple Approval
+name: APEXGenesis Approval with Buttons
 
 on:
   workflow_dispatch:
@@ -7,9 +7,11 @@ on:
         description: 'Message to send'
         required: true
         type: string
-
-permissions:
-  contents: read
+      approve_id:
+        description: 'Approval ID for this signal'
+        required: false
+        type: string
+        default: 'test'
 
 jobs:
   send-telegram:
@@ -19,9 +21,11 @@ jobs:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
-      - name: Send message
+      - name: Send message with inline keyboard
         run: |
+          # Send message with inline keyboard buttons
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=${{ github.event.inputs.message }}" \
-            -d "parse_mode=Markdown"
+            -d "parse_mode=Markdown" \
+            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ Approve\",\"callback_data\":\"approve_${{ github.event.inputs.approve_id }}\"},{\"text\":\"❌ Reject\",\"callback_data\":\"reject_${{ github.event.inputs.approve_id }}\"}]]}"
