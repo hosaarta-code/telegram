@@ -1,0 +1,30 @@
+name: Handle Telegram Callback
+
+on:
+  workflow_dispatch:
+    inputs:
+      callback_data:
+        description: 'Callback data from Telegram'
+        required: true
+        type: string
+
+jobs:
+  process-callback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Process callback
+        run: |
+          echo "Received callback: ${{ github.event.inputs.callback_data }}"
+          
+          # Extract action and ID
+          ACTION=$(echo "${{ github.event.inputs.callback_data }}" | cut -d'_' -f1)
+          ID=$(echo "${{ github.event.inputs.callback_data }}" | cut -d'_' -f2-)
+          
+          echo "Action: $ACTION"
+          echo "ID: $ID"
+          
+          # Send result back to your bot via GitHub Actions
+          curl -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=✅ Signal ${ID} was ${ACTION}ed!" \
+            -d "parse_mode=Markdown"
