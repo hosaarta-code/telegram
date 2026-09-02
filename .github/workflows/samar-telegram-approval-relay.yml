@@ -78,6 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       APPROVAL_ID: ${{ inputs.approval_id }}
@@ -165,6 +166,19 @@ jobs:
               if [[ "${MESSAGE_TYPE:-APPROVAL}" == "MATERIAL_CHANGE" ]]; then updated_message="$(printf '%s\n' "$message" "وضعیت: ${decision} — تصمیم ثبت شد؛ بررسی محلی و قابل‌ممیزی ادامه دارد.")"; else updated_message="$(printf '%s\n' "$message" "Status: ${decision} — decision captured; local SAMAR validation follows.")"; fi
               empty_keyboard="$(jq -cn '{inline_keyboard:[]}')"
               curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "message_id=${message_id}" --data-urlencode "text=${updated_message}" --data-urlencode "reply_markup=${empty_keyboard}" >/dev/null || { echo "Telegram decision was captured, but the message could not be updated."; }
+              
+              # --- ارسال پیام نهایی ---
+              if [[ "$decision" == "APPROVE" ]]; then
+                FINAL_MESSAGE="✅ **POSITION APPROVED!**\n\nTrade for ${CONTRACT} has been approved and will be executed."
+              else
+                FINAL_MESSAGE="❌ **POSITION REJECTED!**\n\nTrade for ${CONTRACT} has been rejected."
+              fi
+              curl --silent --show-error --fail --max-time 20 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${CHAT_ID}" \
+                --data-urlencode "text=${FINAL_MESSAGE}" \
+                --data-urlencode "parse_mode=Markdown" >/dev/null || { echo "Telegram final message failed."; }
+              # --- پایان پیام نهایی ---
+              
               break
             fi
           done
