@@ -3,32 +3,283 @@ name: APEXGenesis Telegram Approval
 on:
   workflow_dispatch:
     inputs:
-      message:
-        description: 'Message to send (HTML, no emoji in button text)'
+      approval_id:
+        description: 'Approval ID (e.g. 8_btc)'
         required: true
         type: string
-      approval_id:
-        description: 'Approval ID (e.g., 8_cycle)'
+      correlation_id:
+        description: 'One-time correlation ID for this cycle'
         required: true
+        type: string
+      expires_at_ms:
+        description: 'Unix ms expiry timestamp'
+        required: true
+        type: string
+      mode:
+        description: 'PAPER or LIVE'
+        required: true
+        type: string
+      contract:
+        description: 'Symbol e.g. BTCUSDT'
+        required: true
+        type: string
+      direction:
+        description: 'LONG or SHORT'
+        required: true
+        type: string
+      position_size_usdt:
+        description: 'Size in USDT'
+        required: false
+        type: string
+      risk_usdt:
+        description: 'Risk in USDT'
+        required: false
+        type: string
+      leverage:
+        description: 'Leverage'
+        required: false
+        type: string
+      entry_price:
+        description: 'Entry price'
+        required: false
+        type: string
+      stop_loss:
+        description: 'Stop loss price'
+        required: false
+        type: string
+      take_profit:
+        description: 'Take profit price'
+        required: false
+        type: string
+      message_text:
+        description: 'Full message body'
+        required: true
+        type: string
+      backend_webhook_url:
+        description: 'URL to POST decision back to system (e.g. http://backend:8000/api/v1/approval/notify)'
+        required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
-  send-telegram:
+  telegram-approval:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      APPROVAL_ID: ${{ inputs.approval_id }}
+      CORRELATION_ID: ${{ inputs.correlation_id }}
+      EXPIRES_AT_MS: ${{ inputs.expires_at_ms }}
+      MODE: ${{ inputs.mode }}
+      CONTRACT: ${{ inputs.contract }}
+      DIRECTION: ${{ inputs.direction }}
+      POSITION_SIZE_USDT: ${{ inputs.position_size_usdt }}
+      RISK_USDT: ${{ inputs.risk_usdt }}
+      LEVERAGE: ${{ inputs.leverage }}
+      ENTRY_PRICE: ${{ inputs.entry_price }}
+      STOP_LOSS: ${{ inputs.stop_loss }}
+      TAKE_PROFIT: ${{ inputs.take_profit }}
+      MESSAGE_TEXT: ${{ inputs.message_text }}
+      BACKEND_WEBHOOK_URL: ${{ inputs.backend_webhook_url }}
     steps:
-      - name: Send message with clean inline keyboard
+      - name: Send approval message with keyboard and wait for click
+        id: relay
+        shell: bash
         run: |
-          # Create callback data
-          APPROVE_DATA="approve_${{ github.event.inputs.approval_id }}"
-          REJECT_DATA="reject_${{ github.event.inputs.approval_id }}"
+          set -euo pipefail
 
-          # Send message with clean keyboard (APPROVE / REJECT only)
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=${{ github.event.inputs.message }}" \
-            -d "parse_mode=HTML" \
-            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"APPROVE\",\"callback_data\":\"${APPROVE_DATA}\"},{\"text\":\"REJECT\",\"callback_data\":\"${REJECT_DATA}\"}]]}"
+          echo "=== STEP 1: Send message with APPROVE/REJECT buttons ==="
+          APPROVE_DATA="approve:${CORRELATION_ID}"
+          REJECT_DATA="reject:${CORRELATION_ID}"
+
+          keyboard="$(jq -cn \
+            --arg approve "$APPROVE_DATA" \
+            --arg reject "$REJECT_DATA" \
+            '{inline_keyboard:[[{text:"APPROVE",callback_data:$approve},{text:"REJECT",callback_data:$reject}]]}' )"
+
+          echo "Sending message..."
+          sent="$(curl --silent --show-error --fail --max-time 20 \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE_TEXT}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "reply_markup=${keyboard}" \
+          )" || { echo "FATAL: Telegram send failed"; exit 1; }
+
+          echo "Telegram response: $sent"
+          echo "$sent" | jq -e '.ok == true' >/dev/null || { echo "FATAL: Telegram rejected message"; exit 1; }
+
+          message_id="$(printf '%s' "$sent" | jq -r '.result.message_id // empty')"
+          [[ "$message_id" =~ ^[0-9]+$ ]] || { echo "FATAL: No message_id returned"; exit 1; }
+          echo "message_id=${message_id}" >> "$GITHUB_OUTPUT"
+          echo "=== Message sent. message_id=$message_id ==="
+
+          echo "=== STEP 2: Preflight getUpdates (get current offset) ==="
+          initial="$(curl --silent --show-error --fail --max-time 20 \
+            --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" \
+            --data-urlencode "timeout=0" \
+          )" || { echo "WARNING: Telegram preflight failed (may be blocked)"; initial="{}"; }
+          offset="$(printf '%s' "$initial" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
+          echo "Starting poll from offset: $offset"
+
+          echo "=== STEP 3: Poll for user button click ==="
+          decision="EXPIRED"
+          max_loops=60
+          loop=0
+
+          while (( loop < max_loops )) && (( $(date +%s%3N) < EXPIRES_AT_MS )); do
+            loop=$((loop + 1))
+            echo "Poll attempt $loop..."
+
+            args=(--silent --show-error --fail --max-time 20 \
+              --get "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" \
+              --data-urlencode "timeout=10" \
+            )
+            if [[ -n "$offset" && "$offset" != "null" && "$offset" != "" ]]; then
+              args+=(--data-urlencode "offset=${offset}")
+            fi
+
+            updates="$(curl "${args[@]}")" || { echo "WARNING: getUpdates failed, retrying..."; sleep 2; continue; }
+
+            next_offset="$(printf '%s' "$updates" | jq -r '[.result[]?.update_id] | if length == 0 then "" else (max + 1 | tostring) end')"
+            if [[ -n "$next_offset" && "$next_offset" != "null" && "$next_offset" != "" ]]; then
+              offset="$next_offset"
+            fi
+
+            callback="$(printf '%s' "$updates" | jq -r \
+              --arg chat "$CHAT_ID" \
+              --arg approve "$APPROVE_DATA" \
+              --arg reject "$REJECT_DATA" \
+              '[.result[]?.callback_query |
+                select(
+                  ((.message.chat.id // "") | tostring) == $chat
+                  and ((.from.id // "") | tostring) == $chat
+                  and (.data == $approve or .data == $reject)
+                )
+              ][0] // empty' \
+            )"
+
+            if [[ -n "$callback" && "$callback" != "null" && "$callback" != "empty" ]]; then
+              echo "=== BUTTON CLICK DETECTED ==="
+              callback_id="$(printf '%s' "$callback" | jq -r '.id')"
+              callback_data="$(printf '%s' "$callback" | jq -r '.data')"
+              echo "callback_id=$callback_id data=$callback_data"
+
+              if [[ "$callback_data" == "$APPROVE_DATA" ]]; then
+                decision="APPROVE"
+              else
+                decision="REJECT"
+              fi
+              echo "decision=${decision}" >> "$GITHUB_OUTPUT"
+
+              echo "=== STEP 4: answerCallbackQuery ==="
+              curl --silent --show-error --fail --max-time 10 \
+                -X POST "https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery" \
+                --data-urlencode "callback_query_id=${callback_id}" \
+                --data-urlencode "text=Decision ${decision} received. Processing..." \
+                >/dev/null 2>&1 || true
+
+              echo "=== STEP 5: editMessageReplyMarkup (remove buttons) ==="
+              empty_keyboard="$(jq -cn '{inline_keyboard:[]}')"
+              edit_result="$(curl --silent --show-error --fail --max-time 10 \
+                -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup" \
+                --data-urlencode "chat_id=${CHAT_ID}" \
+                --data-urlencode "message_id=${message_id}" \
+                --data-urlencode "reply_markup=${empty_keyboard}" \
+              )"
+              echo "editMessageReplyMarkup: $edit_result"
+
+              echo "=== STEP 6: Send final confirmation message ==="
+              if [[ "$decision" == "APPROVE" ]]; then
+                final_text="✅ DECISION RECORDED — ${CONTRACT} ${MODE} ${DIRECTION} APPROVED. Position will be opened in system."
+              else
+                final_text="❌ DECISION RECORDED — ${CONTRACT} ${MODE} ${DIRECTION} REJECTED. No position will be opened."
+              fi
+              curl --silent --show-error --fail --max-time 10 \
+                -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${CHAT_ID}" \
+                --data-urlencode "text=${final_text}" \
+                --data-urlencode "parse_mode=HTML" \
+                >/dev/null 2>&1 || true
+
+              echo "=== STEP 7: POST decision to backend ==="
+              if [[ -n "${BACKEND_WEBHOOK_URL:-}" ]]; then
+                curl --silent --show-error --fail --max-time 15 \
+                  -X POST "${BACKEND_WEBHOOK_URL}" \
+                  -H "Content-Type: application/json" \
+                  -d "$(jq -cn \
+                    --arg approval_id "$APPROVAL_ID" \
+                    --arg correlation_id "$CORRELATION_ID" \
+                    --arg decision "$decision" \
+                    --arg mode "$MODE" \
+                    --arg contract "$CONTRACT" \
+                    --arg direction "$DIRECTION" \
+                    '{
+                      approval_id: $approval_id,
+                      correlation_id: $correlation_id,
+                      decision: $decision,
+                      mode: $mode,
+                      contract: $contract,
+                      direction: $direction,
+                      channel: "github_actions",
+                      timestamp: (now | todate)
+                    }')" \
+                  >/dev/null 2>&1 || echo "WARNING: Backend webhook failed"
+              fi
+
+              echo "=== CYCLE COMPLETE. decision=$decision ==="
+              break
+            else
+              echo "No callback yet, sleeping 2s..."
+              sleep 2
+            fi
+          done
+
+          if [[ "$decision" == "EXPIRED" ]]; then
+            echo "decision=EXPIRED" >> "$GITHUB_OUTPUT"
+            echo "=== EXPIRED: No click received within time ==="
+            curl --silent --show-error --fail --max-time 10 \
+              -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=⏰ APPROVAL EXPIRED — ${CONTRACT} ${MODE} position not opened." \
+              --data-urlencode "parse_mode=HTML" \
+              >/dev/null 2>&1 || true
+          fi
+
+      - name: Write decision artifact
+        shell: bash
+        env:
+          DECISION: ${{ steps.relay.outputs.decision || 'UNKNOWN' }}
+        run: |
+          set -euo pipefail
+          echo "=== Decision: $DECISION ==="
+          jq -cn \
+            --arg approval_id "$APPROVAL_ID" \
+            --arg correlation_id "$CORRELATION_ID" \
+            --arg decision "$DECISION" \
+            --arg mode "$MODE" \
+            --arg contract "$CONTRACT" \
+            --arg direction "$DIRECTION" \
+            '{
+              schema_version: 1,
+              approval_id: $approval_id,
+              correlation_id: $correlation_id,
+              decision: $decision,
+              mode: $mode,
+              contract: $contract,
+              direction: $direction,
+              channel: "github_actions",
+              timestamp: (now | todate)
+            }' > decision.json
+          cat decision.json
+
+      - name: Upload decision artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: approval-decision-${{ inputs.correlation_id }}
+          path: decision.json
+          if-no-files-found: error
+          retention-days: 7
