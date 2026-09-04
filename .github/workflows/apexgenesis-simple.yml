@@ -31,4 +31,4 @@ jobs:
             -d "chat_id=${CHAT_ID}" \
             -d "text=${{ github.event.inputs.message }}" \
             -d "parse_mode=Markdown" \
-            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ Approve\",\"callback_data\":\"${APPROVE_DATA}\"},{\"text\":\"❌ Reject\",\"callback_data\":\"${REJECT_DATA}\"}]]}"
+            -d "reply_markup={\"inline_keyboard\":[[{\"text\":\"âœ… Approve\",\"callback_data\":\"${APPROVE_DATA}\"},{\"text\":\"â‌Œ Reject\",\"callback_data\":\"${REJECT_DATA}\"}]]}"
